@@ -115,20 +115,24 @@ class AKShareClient:
         ak_code = _ts_to_ak(ts_code)
 
         checks = [
-            ("stock_individual_info_em",
-             lambda: ak.stock_individual_info_em(symbol=code)),
-            ("stock_zh_a_hist",
-             lambda: ak.stock_zh_a_hist(symbol=code, period="daily",
-                                        start_date="20250101", end_date="20251231",
-                                        adjust="qfq")),
-            ("stock_financial_report_sina(利润表)",
-             lambda: ak.stock_financial_report_sina(stock=ak_code, symbol="利润表")),
-            ("stock_profit_sheet_by_report_em",
+            ("stock_profile_cninfo(公司概况)",
+             lambda: ak.stock_profile_cninfo(symbol=code)),
+            ("stock_zh_a_gbjg_em(股本结构)",
+             lambda: ak.stock_zh_a_gbjg_em(symbol=code)),
+            ("stock_zh_a_daily(新浪日线)",
+             lambda: ak.stock_zh_a_daily(symbol=ak_code, adjust="qfq")),
+            ("stock_profit_sheet_by_report_em(东财利润表)",
              lambda: ak.stock_profit_sheet_by_report_em(symbol=ak_code.upper())),
-            ("stock_balance_sheet_by_report_em",
+            ("stock_balance_sheet_by_report_em(东财资产负债表)",
              lambda: ak.stock_balance_sheet_by_report_em(symbol=ak_code.upper())),
-            ("stock_financial_analysis_indicator",
+            ("stock_cash_flow_sheet_by_report_em(东财现金流)",
+             lambda: ak.stock_cash_flow_sheet_by_report_em(symbol=ak_code.upper())),
+            ("stock_financial_report_sina(新浪利润表)",
+             lambda: ak.stock_financial_report_sina(stock=ak_code, symbol="利润表")),
+            ("stock_financial_analysis_indicator(财务指标)",
              lambda: ak.stock_financial_analysis_indicator(symbol=code)),
+            ("stock_individual_info_em(东财push2，易限流)",
+             lambda: ak.stock_individual_info_em(symbol=code)),
         ]
 
         for name, fn in checks:
@@ -254,24 +258,58 @@ class AKShareClient:
             return cached
 
         code = _ts_to_code(ts_code)
+        name, industry, list_date = "", "", ""
+        total_share = 0.0
+        float_share = 0.0
+
+        # 1) 巨潮公司概况：名称 / 行业（不依赖东财 push2，稳定）
         try:
-            df = ak.stock_individual_info_em(symbol=code)
-            # 转成 dict
-            info_dict = dict(zip(df["item"], df["value"]))
-            result = pd.DataFrame([{
-                "ts_code": ts_code,
-                "name": info_dict.get("股票简称", ""),
-                "industry": info_dict.get("行业", ""),
-                "list_date": str(info_dict.get("上市时间", "")),
-                "total_share": float(info_dict.get("总股本", 0) or 0),
-                "float_share": float(info_dict.get("流通股", 0) or 0),
-                "total_mv": float(info_dict.get("总市值", 0) or 0),
-            }])
-            self._set_cache(cache_key, result)
-            return result
+            prof = ak.stock_profile_cninfo(symbol=code)
+            if prof is not None and not prof.empty:
+                row = prof.iloc[0]
+                name = str(row.get("A股简称", "") or "")
+                industry = str(row.get("所属行业", "") or "")
+                list_date = str(row.get("上市日期", "") or "")
         except Exception as e:
-            self._fail(f"获取股票基本信息失败 {ts_code}", e)
+            self._fail(f"公司概况 {ts_code}", e)
+
+        # 2) 东财 F10 股本结构：总股本 / 流通股本（非 push2 接口）
+        try:
+            gbjg = ak.stock_zh_a_gbjg_em(symbol=code)
+            if gbjg is not None and not gbjg.empty:
+                gbjg = gbjg.sort_values("变更日期", ascending=False)
+                total_share = float(gbjg.iloc[0].get("总股本", 0) or 0)
+                float_share = float(gbjg.iloc[0].get("已上市流通A股", 0) or 0)
+        except Exception as e:
+            self._fail(f"股本结构 {ts_code}", e)
+
+        # 3) 兜底：东财个股信息（走 push2，可能触发限流，仅在前两者失败时使用）
+        if not name or total_share <= 0:
+            try:
+                info = ak.stock_individual_info_em(symbol=code)
+                d = dict(zip(info["item"], info["value"]))
+                name = name or str(d.get("股票简称", "") or "")
+                industry = industry or str(d.get("行业", "") or "")
+                total_share = total_share or float(d.get("总股本", 0) or 0)
+                float_share = float_share or float(d.get("流通股", 0) or 0)
+                list_date = list_date or str(d.get("上市时间", "") or "")
+            except Exception as e:
+                self._fail(f"个股信息 {ts_code}", e)
+
+        if not name and total_share <= 0:
             return pd.DataFrame()
+
+        result = pd.DataFrame([{
+            "ts_code": ts_code,
+            "name": name,
+            "industry": industry,
+            "list_date": list_date,
+            "total_share": total_share,
+            "float_share": float_share,
+            "total_mv": 0.0,  # 市值在 get_daily_basic 中按 股本×收盘价 计算
+        }])
+        self._set_cache(cache_key, result)
+        return result
 
     # ============================================================
     # 利润表
@@ -294,10 +332,18 @@ class AKShareClient:
 
         ak_code = _ts_to_ak(ts_code)
         try:
-            # 优先东方财富通道（境外服务器访问更稳定），拿不到再回退新浪
-            df = self._em_income(ts_code)
-            if df.empty or df["revenue"].abs().sum() <= 0:
+            # 优先新浪（单次请求约 1s），失败再回退东方财富（分批请求，较慢）
+            df = pd.DataFrame()
+            try:
                 df = ak.stock_financial_report_sina(stock=ak_code, symbol="利润表")
+            except Exception as e:
+                self._fail(f"新浪利润表 {ts_code}", e)
+            if df.empty:
+                try:
+                    df = self._em_income(ts_code)
+                except Exception as e:
+                    self._fail(f"东财利润表 {ts_code}", e)
+                    df = pd.DataFrame()
             if df.empty:
                 return pd.DataFrame()
 
@@ -356,10 +402,18 @@ class AKShareClient:
 
         ak_code = _ts_to_ak(ts_code)
         try:
-            # 优先东方财富通道，拿不到再回退新浪
-            df = self._em_balance(ts_code)
-            if df.empty or df["total_assets"].abs().sum() <= 0:
+            # 优先新浪，失败再回退东方财富
+            df = pd.DataFrame()
+            try:
                 df = ak.stock_financial_report_sina(stock=ak_code, symbol="资产负债表")
+            except Exception as e:
+                self._fail(f"新浪资产负债表 {ts_code}", e)
+            if df.empty:
+                try:
+                    df = self._em_balance(ts_code)
+                except Exception as e:
+                    self._fail(f"东财资产负债表 {ts_code}", e)
+                    df = pd.DataFrame()
             if df.empty:
                 return pd.DataFrame()
 
@@ -419,10 +473,18 @@ class AKShareClient:
 
         ak_code = _ts_to_ak(ts_code)
         try:
-            # 优先东方财富通道，拿不到再回退新浪
-            df = self._em_cashflow(ts_code)
-            if df.empty:
+            # 优先新浪，失败再回退东方财富
+            df = pd.DataFrame()
+            try:
                 df = ak.stock_financial_report_sina(stock=ak_code, symbol="现金流量表")
+            except Exception as e:
+                self._fail(f"新浪现金流量表 {ts_code}", e)
+            if df.empty:
+                try:
+                    df = self._em_cashflow(ts_code)
+                except Exception as e:
+                    self._fail(f"东财现金流量表 {ts_code}", e)
+                    df = pd.DataFrame()
             if df.empty:
                 return pd.DataFrame()
 
@@ -477,13 +539,11 @@ class AKShareClient:
 
         code = _ts_to_code(ts_code)
         try:
-            # 从基本信息获取总市值
-            info_df = ak.stock_individual_info_em(symbol=code)
-            info_dict = dict(zip(info_df["item"], info_df["value"]))
-
-            total_mv = float(info_dict.get("总市值", 0) or 0)
-            # AKShare 的总市值单位是元，转为万元（与 Tushare 一致）
-            total_mv_wan = total_mv / 10000
+            # 总市值 = 总股本 × 最新收盘价（避免调用 push2 的个股信息接口）
+            basic_df = self.get_stock_basic(ts_code)
+            total_share = 0.0
+            if not basic_df.empty:
+                total_share = float(basic_df.iloc[0].get("total_share", 0) or 0)
 
             # 从日线获取最新收盘价
             daily_df = self.get_daily(ts_code)
@@ -493,6 +553,9 @@ class AKShareClient:
             latest = daily_df.iloc[-1]
             close_price = float(latest.get("close", 0))
             trade_date_str = str(latest.get("trade_date", ""))
+            total_mv = total_share * close_price
+            # 单位：元 → 万元（与 Tushare 一致）
+            total_mv_wan = total_mv / 10000
 
             # 从利润表获取最新年报净利润，用于计算 PE
             income_df = self.get_income(ts_code)
@@ -566,34 +629,56 @@ class AKShareClient:
             start = start_date
             end = end_date
 
-            df = ak.stock_zh_a_hist(
-                symbol=code,
-                period="daily",
-                start_date=start,
-                end_date=end,
-                adjust="qfq",
-            )
+            # 优先新浪日线（不经过东财 push2，不会触发行情限流），失败再回退东财 / 腾讯
+            df = pd.DataFrame()
+            try:
+                raw = ak.stock_zh_a_daily(symbol=_ts_to_ak(ts_code), adjust="qfq")
+                if raw is not None and not raw.empty:
+                    df = raw.rename(columns={"date": "trade_date", "volume": "vol"})
+            except Exception as e:
+                self._fail(f"新浪日线 {ts_code}", e)
+
+            if df.empty:
+                try:
+                    raw = ak.stock_zh_a_hist(
+                        symbol=code,
+                        period="daily",
+                        start_date=start,
+                        end_date=end,
+                        adjust="qfq",
+                    )
+                    if raw is not None and not raw.empty:
+                        df = raw.rename(columns={
+                            "日期": "trade_date", "开盘": "open", "收盘": "close",
+                            "最高": "high", "最低": "low", "成交量": "vol",
+                            "成交额": "amount", "振幅": "amplitude",
+                            "涨跌幅": "pct_chg", "涨跌额": "change", "换手率": "turnover",
+                        })
+                except Exception as e:
+                    self._fail(f"东财日线 {ts_code}", e)
+
+            if df.empty:
+                try:
+                    raw = ak.stock_zh_a_hist_tx(
+                        symbol=_ts_to_ak(ts_code),
+                        start_date=start,
+                        end_date=end,
+                        adjust="qfq",
+                    )
+                    if raw is not None and not raw.empty:
+                        df = raw.rename(columns={"date": "trade_date", "volume": "vol"})
+                except Exception as e:
+                    self._fail(f"腾讯日线 {ts_code}", e)
+
             if df.empty:
                 return pd.DataFrame()
 
-            rename_map = {
-                "日期": "trade_date",
-                "开盘": "open",
-                "收盘": "close",
-                "最高": "high",
-                "最低": "low",
-                "成交量": "vol",
-                "成交额": "amount",
-                "振幅": "amplitude",
-                "涨跌幅": "pct_chg",
-                "涨跌额": "change",
-                "换手率": "turnover",
-            }
-            df = df.rename(columns=rename_map)
-            keep_cols = [c for c in rename_map.values() if c in df.columns]
-            df = df[keep_cols].copy()
+            keep = ["trade_date", "open", "close", "high", "low", "vol", "amount",
+                    "amplitude", "pct_chg", "change", "turnover"]
+            df = df[[c for c in keep if c in df.columns]].copy()
             df["ts_code"] = ts_code
-            df["trade_date"] = df["trade_date"].astype(str).str.replace("-", "")
+            df["trade_date"] = df["trade_date"].astype(str).str[:10].str.replace("-", "")
+            df = df[(df["trade_date"] >= start) & (df["trade_date"] <= end)]
             df = df.sort_values("trade_date").reset_index(drop=True)
 
             self._set_cache(cache_key, df)
@@ -617,19 +702,16 @@ class AKShareClient:
 
         code = _ts_to_code(ts_code)
         try:
-            df = ak.stock_fhps_em(date="20241231")  # 获取最近的分红数据
-            if df.empty:
+            # 新浪单只股票分红历史（0.5s 级别；原 stock_fhps_em 需拉全市场，非常慢）
+            df = ak.stock_history_dividend_detail(symbol=code, indicator="分红")
+            if df is None or df.empty:
                 return pd.DataFrame()
 
-            # 过滤指定股票
-            if "代码" in df.columns:
-                df = df[df["代码"].astype(str) == code]
-
             rename_map = {
-                "分红年度": "end_date",
-                "每10股派息(税前)(元)": "cash_div",
-                "每10股转增股本(股)": "transfer_sh",
-                "每10股送红股(股)": "stock_div",
+                "公告日期": "ann_date",
+                "派息": "cash_div",       # 每10股派息（税前，元）
+                "送股": "stock_div",
+                "转增": "transfer_sh",
                 "股权登记日": "record_date",
                 "除权除息日": "ex_date",
             }
