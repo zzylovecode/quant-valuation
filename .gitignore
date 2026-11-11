@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# 数据与临时文件
+*.csv
+!sample_*.csv
+.cache/
+
+# 编辑器
+.vscode/
+.idea/
+.DS_Store
