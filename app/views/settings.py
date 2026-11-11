@@ -97,6 +97,22 @@ def render():
         st.success("💡 **Tushare 专业模式**：从 Tushare 专业接口获取数据，质量高、稳定可靠。"
                    "需要 Token 和积分。")
 
+    # AKShare 数据源诊断（云端排查用）
+    if mode_val == "akshare":
+        st.markdown("---")
+        st.subheader("🔍 数据源诊断")
+        st.caption("逐个测试 AKShare 各接口的连通性。云端部署在境外服务器时，"
+                   "部分国内数据源可能访问受限，可用此功能定位问题。")
+        if st.button("运行诊断（测试 600519 贵州茅台）"):
+            from quant_valuation.data_sources import AKShareClient
+
+            with st.spinner("正在逐个测试接口，约需 30~60 秒..."):
+                try:
+                    diag = AKShareClient().diagnose("600519.SH")
+                    st.dataframe(diag, use_container_width=True, hide_index=True)
+                except Exception as e:
+                    st.error(f"诊断失败: {type(e).__name__}: {e}")
+
     st.markdown("---")
 
     # 积分要求

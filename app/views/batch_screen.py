@@ -82,8 +82,11 @@ def _load_akshare_batch_with_progress(stock_codes: tuple, progress_bar):
             data = builder.build(code, years=3)
             data_list.append(data)
         except Exception as e:
-            failed.append(f"{code}: {str(e)[:40]}")
+            failed.append(f"{code}: {type(e).__name__}: {str(e)[:120]}")
             continue
+
+    # 收集客户端记录的接口级错误，便于排查
+    client_errors = getattr(builder.client, "errors", {})
 
     # 完成
     if failed:
@@ -96,6 +99,10 @@ def _load_akshare_batch_with_progress(stock_codes: tuple, progress_bar):
             1.0,
             text=f"✅ 完成：成功加载 {len(data_list)} 只股票"
         )
+
+    # 保存失败详情，供界面展示排查
+    st.session_state["akshare_load_failures"] = failed[:10]
+    st.session_state["akshare_client_errors"] = dict(list(client_errors.items())[:10])
 
     return data_list
 
@@ -368,7 +375,16 @@ def render():
                             tuple(stock_codes), progress_bar
                         )
                         if not data_list:
-                            st.error("没有成功加载任何股票，请检查代码是否正确")
+                            st.error("没有成功加载任何股票，下面是具体失败原因：")
+                            failures = st.session_state.get("akshare_load_failures", [])
+                            client_errors = st.session_state.get("akshare_client_errors", {})
+                            if failures:
+                                st.code("\n".join(failures), language="text")
+                            if client_errors:
+                                st.markdown("**接口级错误：**")
+                                st.code("\n".join(f"{k} → {v}" for k, v in client_errors.items()),
+                                        language="text")
+                            st.caption("可前往「⚙️ 数据设置」页运行数据源诊断，查看各个接口的连通情况。")
                             results = []
                         else:
                             valuator = BatchValuator(company_type="growth", verbose=False)

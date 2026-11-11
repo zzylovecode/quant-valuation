@@ -84,11 +84,151 @@ class AKShareClient:
         self.timeout = timeout
         self.enable_cache = enable_cache
         self._cache: Dict[str, pd.DataFrame] = {}
+        # 记录各接口的失败原因，供界面诊断展示
+        self.errors: Dict[str, str] = {}
+
+    def _fail(self, key: str, e: Exception):
+        """记录接口失败原因（不再静默吞掉异常）"""
+        self.errors[key] = f"{type(e).__name__}: {str(e)[:200]}"
+        warnings.warn(f"{key} 失败: {e}")
+
+    def diagnose(self, ts_code: str = "600519.SH") -> pd.DataFrame:
+        """
+        逐个测试数据接口，返回状态表。用于排查云端环境下的数据源问题。
+
+        Args:
+            ts_code: 测试用股票代码
+
+        Returns:
+            DataFrame，列为 接口 / 状态 / 详情
+        """
+        rows = []
+        try:
+            import akshare
+
+            rows.append({"接口": "akshare 版本", "状态": "OK", "详情": akshare.__version__})
+        except Exception as e:  # pragma: no cover
+            rows.append({"接口": "akshare 导入", "状态": "FAIL", "详情": str(e)[:150]})
+            return pd.DataFrame(rows)
+
+        code = _ts_to_code(ts_code)
+        ak_code = _ts_to_ak(ts_code)
+
+        checks = [
+            ("stock_individual_info_em",
+             lambda: ak.stock_individual_info_em(symbol=code)),
+            ("stock_zh_a_hist",
+             lambda: ak.stock_zh_a_hist(symbol=code, period="daily",
+                                        start_date="20250101", end_date="20251231",
+                                        adjust="qfq")),
+            ("stock_financial_report_sina(利润表)",
+             lambda: ak.stock_financial_report_sina(stock=ak_code, symbol="利润表")),
+            ("stock_profit_sheet_by_report_em",
+             lambda: ak.stock_profit_sheet_by_report_em(symbol=ak_code.upper())),
+            ("stock_balance_sheet_by_report_em",
+             lambda: ak.stock_balance_sheet_by_report_em(symbol=ak_code.upper())),
+            ("stock_financial_analysis_indicator",
+             lambda: ak.stock_financial_analysis_indicator(symbol=code)),
+        ]
+
+        for name, fn in checks:
+            try:
+                df = fn()
+                rows.append({"接口": name, "状态": "OK", "详情": f"返回 {len(df)} 行"})
+            except Exception as e:
+                detail = f"{type(e).__name__}: {str(e)[:150]}"
+                if not hasattr(ak, name.split("(")[0]):
+                    detail = "当前 akshare 版本不存在该接口"
+                rows.append({"接口": name, "状态": "FAIL", "详情": detail})
+
+        return pd.DataFrame(rows)
 
     def _get_cache(self, key: str) -> Optional[pd.DataFrame]:
         if not self.enable_cache:
             return None
         return self._cache.get(key)
+
+    # ---------- 东方财富报表通道（境外服务器访问更稳定） ----------
+
+    def _em_income(self, ts_code: str) -> pd.DataFrame:
+        """东方财富利润表，返回与新浪通道一致的列名"""
+        df = ak.stock_profit_sheet_by_report_em(symbol=_ts_to_ak(ts_code).upper())
+        if df is None or df.empty or "REPORT_DATE" not in df.columns:
+            return pd.DataFrame()
+
+        out = pd.DataFrame()
+        out["end_date"] = df["REPORT_DATE"].astype(str).str[:10].str.replace("-", "")
+        rev_src = "OPERATE_INCOME" if "OPERATE_INCOME" in df.columns else "TOTAL_OPERATE_INCOME"
+        field_map = [
+            ("revenue", rev_src),
+            ("total_cost", "TOTAL_OPERATE_COST"),
+            ("operate_cost", "OPERATE_COST"),
+            ("sell_exp", "SALE_EXPENSE"),
+            ("admin_exp", "MANAGE_EXPENSE"),
+            ("fin_exp", "FINANCE_EXPENSE"),
+            ("rd_exp", "RESEARCH_EXPENSE"),
+            ("operate_profit", "OPERATE_PROFIT"),
+            ("total_profit", "TOTAL_PROFIT"),
+            ("net_profit", "NETPROFIT"),
+            ("n_income", "PARENT_NETPROFIT"),
+            ("basic_eps", "BASIC_EPS"),
+        ]
+        for std, src in field_map:
+            out[std] = (pd.to_numeric(df[src], errors="coerce").fillna(0)
+                        if src in df.columns else 0.0)
+        out["ts_code"] = ts_code
+        return out.sort_values("end_date", ascending=False).reset_index(drop=True)
+
+    def _em_balance(self, ts_code: str) -> pd.DataFrame:
+        """东方财富资产负债表，返回与新浪通道一致的列名"""
+        df = ak.stock_balance_sheet_by_report_em(symbol=_ts_to_ak(ts_code).upper())
+        if df is None or df.empty or "REPORT_DATE" not in df.columns:
+            return pd.DataFrame()
+
+        out = pd.DataFrame()
+        out["end_date"] = df["REPORT_DATE"].astype(str).str[:10].str.replace("-", "")
+        field_map = [
+            ("money_cap", "MONETARYFUNDS"),
+            ("notes_receiv", "NOTE_RECE"),
+            ("accounts_receiv", "ACCOUNTS_RECE"),
+            ("inventories", "INVENTORY"),
+            ("total_cur_assets", "TOTAL_CURRENT_ASSETS"),
+            ("fix_assets", "FIXED_ASSET"),
+            ("total_assets", "TOTAL_ASSETS"),
+            ("st_borrow", "SHORT_LOAN"),
+            ("notes_payable", "NOTE_PAYABLE"),
+            ("acct_payable", "ACCOUNTS_PAYABLE"),
+            ("total_cur_liab", "TOTAL_CURRENT_LIAB"),
+            ("lt_borrow", "LONG_LOAN"),
+            ("total_liab", "TOTAL_LIABILITIES"),
+            ("total_hldr_eqy_exc_min_int", "TOTAL_PARENT_EQUITY"),
+        ]
+        for std, src in field_map:
+            out[std] = (pd.to_numeric(df[src], errors="coerce").fillna(0)
+                        if src in df.columns else 0.0)
+        out["ts_code"] = ts_code
+        return out.sort_values("end_date", ascending=False).reset_index(drop=True)
+
+    def _em_cashflow(self, ts_code: str) -> pd.DataFrame:
+        """东方财富现金流量表，返回与新浪通道一致的列名"""
+        df = ak.stock_cash_flow_sheet_by_report_em(symbol=_ts_to_ak(ts_code).upper())
+        if df is None or df.empty or "REPORT_DATE" not in df.columns:
+            return pd.DataFrame()
+
+        out = pd.DataFrame()
+        out["end_date"] = df["REPORT_DATE"].astype(str).str[:10].str.replace("-", "")
+        field_map = [
+            ("n_cashflow_act", "NETCASH_OPERATE"),
+            ("n_cashflow_inv_act", "NETCASH_INVEST"),
+            ("stot_cashflows_frn_act_2", "NETCASH_FINANCE"),
+            ("net_increase_cash_equ", "CCE_ADD"),
+            ("end_cash_cash_equ", "END_CCE"),
+        ]
+        for std, src in field_map:
+            out[std] = (pd.to_numeric(df[src], errors="coerce").fillna(0)
+                        if src in df.columns else 0.0)
+        out["ts_code"] = ts_code
+        return out.sort_values("end_date", ascending=False).reset_index(drop=True)
 
     def _set_cache(self, key: str, df: pd.DataFrame):
         if self.enable_cache:
@@ -130,7 +270,7 @@ class AKShareClient:
             self._set_cache(cache_key, result)
             return result
         except Exception as e:
-            warnings.warn(f"获取股票基本信息失败 {ts_code}: {e}")
+            self._fail(f"获取股票基本信息失败 {ts_code}", e)
             return pd.DataFrame()
 
     # ============================================================
@@ -154,7 +294,10 @@ class AKShareClient:
 
         ak_code = _ts_to_ak(ts_code)
         try:
-            df = ak.stock_financial_report_sina(stock=ak_code, symbol="利润表")
+            # 优先东方财富通道（境外服务器访问更稳定），拿不到再回退新浪
+            df = self._em_income(ts_code)
+            if df.empty or df["revenue"].abs().sum() <= 0:
+                df = ak.stock_financial_report_sina(stock=ak_code, symbol="利润表")
             if df.empty:
                 return pd.DataFrame()
 
@@ -195,7 +338,7 @@ class AKShareClient:
             self._set_cache(cache_key, df)
             return df
         except Exception as e:
-            warnings.warn(f"获取利润表失败 {ts_code}: {e}")
+            self._fail(f"获取利润表失败 {ts_code}", e)
             return pd.DataFrame()
 
     # ============================================================
@@ -213,7 +356,10 @@ class AKShareClient:
 
         ak_code = _ts_to_ak(ts_code)
         try:
-            df = ak.stock_financial_report_sina(stock=ak_code, symbol="资产负债表")
+            # 优先东方财富通道，拿不到再回退新浪
+            df = self._em_balance(ts_code)
+            if df.empty or df["total_assets"].abs().sum() <= 0:
+                df = ak.stock_financial_report_sina(stock=ak_code, symbol="资产负债表")
             if df.empty:
                 return pd.DataFrame()
 
@@ -255,7 +401,7 @@ class AKShareClient:
             self._set_cache(cache_key, df)
             return df
         except Exception as e:
-            warnings.warn(f"获取资产负债表失败 {ts_code}: {e}")
+            self._fail(f"获取资产负债表失败 {ts_code}", e)
             return pd.DataFrame()
 
     # ============================================================
@@ -273,7 +419,10 @@ class AKShareClient:
 
         ak_code = _ts_to_ak(ts_code)
         try:
-            df = ak.stock_financial_report_sina(stock=ak_code, symbol="现金流量表")
+            # 优先东方财富通道，拿不到再回退新浪
+            df = self._em_cashflow(ts_code)
+            if df.empty:
+                df = ak.stock_financial_report_sina(stock=ak_code, symbol="现金流量表")
             if df.empty:
                 return pd.DataFrame()
 
@@ -303,7 +452,7 @@ class AKShareClient:
             self._set_cache(cache_key, df)
             return df
         except Exception as e:
-            warnings.warn(f"获取现金流量表失败 {ts_code}: {e}")
+            self._fail(f"获取现金流量表失败 {ts_code}", e)
             return pd.DataFrame()
 
     # ============================================================
@@ -382,7 +531,7 @@ class AKShareClient:
             self._set_cache(cache_key, result)
             return result
         except Exception as e:
-            warnings.warn(f"获取每日指标失败 {ts_code}: {e}")
+            self._fail(f"获取每日指标失败 {ts_code}", e)
             return pd.DataFrame()
 
     # ============================================================
@@ -450,7 +599,7 @@ class AKShareClient:
             self._set_cache(cache_key, df)
             return df
         except Exception as e:
-            warnings.warn(f"获取日线行情失败 {ts_code}: {e}")
+            self._fail(f"获取日线行情失败 {ts_code}", e)
             return pd.DataFrame()
 
     # ============================================================
@@ -492,7 +641,7 @@ class AKShareClient:
             self._set_cache(cache_key, df)
             return df
         except Exception as e:
-            warnings.warn(f"获取分红数据失败 {ts_code}: {e}")
+            self._fail(f"获取分红数据失败 {ts_code}", e)
             return pd.DataFrame()
 
     # ============================================================
@@ -554,5 +703,5 @@ class AKShareClient:
             self._set_cache(cache_key, df)
             return df
         except Exception as e:
-            warnings.warn(f"获取财务指标失败 {ts_code}: {e}")
+            self._fail(f"获取财务指标失败 {ts_code}", e)
             return pd.DataFrame()
