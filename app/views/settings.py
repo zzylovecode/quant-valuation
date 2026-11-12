@@ -64,12 +64,13 @@ def render():
     st.subheader("📊 数据模式")
     mode_options = [
         ("mock", "🎯 演示数据（Mock）- 内置示例数据，零成本体验"),
-        ("akshare", "🆓 AKShare 免费数据 - 真实 A 股数据，完全免费"),
+        ("yfinance", "🌐 Yahoo Finance - 完全免费，海外服务器直接可用（推荐云端部署）"),
+        ("akshare", "🆓 AKShare 免费数据 - 真实 A 股数据，本地运行最佳"),
         ("tushare", "💎 Tushare 专业数据 - 更全面稳定，需 Token + 积分"),
     ]
 
     current_mode = get_data_mode()
-    mode_idx_map = {"mock": 0, "akshare": 1, "tushare": 2}
+    mode_idx_map = {"mock": 0, "yfinance": 1, "akshare": 2, "tushare": 3}
     default_idx = mode_idx_map.get(current_mode, 0)
 
     mode_val = st.radio(
@@ -90,9 +91,18 @@ def render():
     if mode_val == "mock":
         st.info("💡 **演示模式**：使用内置的模拟数据，可快速体验所有功能。"
                 "适合先熟悉工具操作。")
+    elif mode_val == "yfinance":
+        st.success(
+            "💡 **Yahoo Finance 模式**：从雅虎财经获取真实 A 股数据。"
+            "完全免费，无需注册，海外服务器（如 Streamlit Cloud）**直接可用、绝对稳定**。"
+            "\n\n⚠️ 注意："
+            "\n- 合并报表口径（无「归母净利润/净资产」拆分），估值偏差约 5%"
+            "\n- 中国大陆本地网络可能无法直接访问 Yahoo，需挂代理"
+            "\n- A股代码自动补齐为 `.SS` (沪) / `.SZ` (深)"
+        )
     elif mode_val == "akshare":
         st.success("💡 **AKShare 免费模式**：从东方财富、新浪财经等公开网站获取真实 A 股数据。"
-                   "完全免费，无需注册。数据可能偶尔有延迟或缺失。")
+                   "完全免费，无需注册。数据最全，但依赖国内数据源，海外服务器可能不稳定。")
     else:
         st.success("💡 **Tushare 专业模式**：从 Tushare 专业接口获取数据，质量高、稳定可靠。"
                    "需要 Token 和积分。")

@@ -7,17 +7,22 @@
 
 目前支持：
   - Tushare Pro (tushare)
-  - AKShare (akshare) - 完全免费
+  - AKShare (akshare) - 完全免费，依赖国内数据源
+  - Yahoo Finance (yfinance) - 完全免费，海外服务器可用
 """
 
 from .tushare_client import TushareClient
 from .tushare_builder import TushareDataBuilder
 from .akshare_client import AKShareClient
 from .akshare_builder import AKShareDataBuilder
+from .yfinance_client import YFinanceClient
+from .yfinance_builder import YFinanceDataBuilder
 
 __all__ = [
     "TushareClient",
     "TushareDataBuilder",
     "AKShareClient",
     "AKShareDataBuilder",
+    "YFinanceClient",
+    "YFinanceDataBuilder",
 ]

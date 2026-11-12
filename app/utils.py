@@ -226,13 +226,70 @@ def has_token() -> bool:
 
 
 def get_data_mode() -> str:
-    """获取当前数据模式：mock / akshare / tushare"""
+    """获取当前数据模式：mock / yfinance / akshare / tushare"""
     return st.session_state.get("data_mode", "mock")
 
 
 def set_data_mode(mode: str):
     """设置数据模式"""
     st.session_state.data_mode = mode
+
+
+# ============================================================
+# Yahoo Finance 数据加载工具（免费，海外服务器可用）
+# ============================================================
+
+@st.cache_data(show_spinner="正在从 Yahoo Finance 拉取数据...", ttl=3600)
+def load_stock_from_yfinance(ts_code: str) -> FinancialData:
+    from quant_valuation.data_sources import YFinanceDataBuilder
+    builder = YFinanceDataBuilder()
+    return builder.build(ts_code, years=5)
+
+
+def load_batch_from_yfinance_with_progress(stock_codes: tuple, progress_bar):
+    """YFinance 批量加载 + 强制 reload 模块（绕过 .pyc 缓存）"""
+    import sys as _sys
+    import importlib
+
+    for _name in [
+        "quant_valuation.data_sources.yfinance_client",
+        "quant_valuation.data_sources.yfinance_builder",
+        "quant_valuation.data_sources",
+    ]:
+        if _name in _sys.modules:
+            try:
+                importlib.reload(_sys.modules[_name])
+            except Exception:
+                pass
+
+    from quant_valuation.data_sources.yfinance_builder import YFinanceDataBuilder
+
+    builder = YFinanceDataBuilder()
+    data_list = []
+    failed = []
+    total = len(stock_codes)
+
+    for i, code in enumerate(stock_codes):
+        progress_bar.progress(
+            i / total,
+            text=f"⏳ 正在加载 {i+1}/{total}: {code} ..."
+        )
+        try:
+            data = builder.build(code, years=3)
+            data_list.append(data)
+        except Exception as e:
+            import traceback as _tb
+            failed.append(
+                f"{code}: {type(e).__name__}: {str(e)[:120]}\n"
+                f"  {_tb.format_exc().strip()[-300:]}"
+            )
+
+    progress_bar.progress(1.0, text=f"✅ 完成：成功 {len(data_list)} 只，失败 {len(failed)} 只")
+    st.session_state["yfinance_load_failures"] = failed[:10]
+    st.session_state["yfinance_client_errors"] = dict(
+        list(getattr(builder.client, "errors", {}).items())[:20]
+    )
+    return data_list
 
 
 # ============================================================

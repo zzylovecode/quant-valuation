@@ -331,7 +331,7 @@ def render():
         else:
             st.info("🎯 演示数据")
 
-    is_real_mode = (mode == "akshare") or (mode == "tushare" and has_token())
+    is_real_mode = (mode in ("akshare", "yfinance")) or (mode == "tushare" and has_token())
 
     if is_real_mode:
         with col_pool:
@@ -356,12 +356,15 @@ def render():
             with col_custom:
                 st.caption(f"已选 **{len(stock_codes)}** 只：{', '.join(stock_codes[:5])}...")
 
-        mode_name = "AKShare" if mode == "akshare" else "Tushare"
+        mode_name = {
+            "akshare": "AKShare",
+            "yfinance": "Yahoo Finance",
+            "tushare": "Tushare",
+        }.get(mode, "真实数据")
         col_btn1, col_btn2 = st.columns([1, 3])
         with col_btn1:
             if st.button(f"📥 批量加载估值 ({mode_name})", type="primary", disabled=len(stock_codes) < 1):
                 st.session_state.force_refresh = True
-                # 清除 session_state 缓存
                 for key in list(st.session_state.keys()):
                     if key.startswith("batch_"):
                         del st.session_state[key]
@@ -378,51 +381,81 @@ def render():
     if is_real_mode:
         if stock_codes:
             pool_key = pool_name if pool_name != "自定义" else "custom"
-            cache_key = f"batch_{pool_key}_{len(stock_codes)}"
+            cache_key = f"batch_{mode}_{pool_key}_{len(stock_codes)}"
             refresh = st.session_state.get("force_refresh", False)
 
             if not refresh and cache_key in st.session_state:
-                # 用缓存
                 results = st.session_state[cache_key]
-            else:
-                # 新加载
-                if mode == "akshare":
-                    # AKShare 带进度条加载
-                    progress_bar = st.progress(0.0, text="准备加载...")
-                    try:
-                        data_list = _load_akshare_batch_with_progress(
-                            tuple(stock_codes), progress_bar
+            elif mode == "yfinance":
+                from utils import load_batch_from_yfinance_with_progress
+                progress_bar = st.progress(0.0, text="准备加载...")
+                try:
+                    data_list = load_batch_from_yfinance_with_progress(
+                        tuple(stock_codes), progress_bar
+                    )
+                    if not data_list:
+                        st.error("没有成功加载任何股票，下面是具体失败原因：")
+                        failures = st.session_state.get("yfinance_load_failures", [])
+                        client_errors = st.session_state.get("yfinance_client_errors", {})
+                        if failures:
+                            st.code("\n".join(failures), language="text")
+                        if client_errors:
+                            st.markdown("**接口级错误：**")
+                            st.code("\n".join(f"{k} → {v}" for k, v in client_errors.items()),
+                                    language="text")
+                        st.caption(
+                            "💡 YFinance 海外服务器一般能连通。如果这里也失败，"
+                            "大概率是 yfinance 自身限流，可以稍后重试。"
                         )
-                        if not data_list:
-                            st.error("没有成功加载任何股票，下面是具体失败原因：")
-                            failures = st.session_state.get("akshare_load_failures", [])
-                            client_errors = st.session_state.get("akshare_client_errors", {})
-                            if failures:
-                                st.code("\n".join(failures), language="text")
-                            if client_errors:
-                                st.markdown("**接口级错误：**")
-                                st.code("\n".join(f"{k} → {v}" for k, v in client_errors.items()),
-                                        language="text")
-                            st.caption("可前往「⚙️ 数据设置」页运行数据源诊断，查看各个接口的连通情况。")
-                            results = []
-                        else:
-                            valuator = BatchValuator(company_type="growth", verbose=False)
-                            results = valuator.valuate(data_list)
-                            st.session_state[cache_key] = results
+                        results = []
+                    else:
+                        valuator = BatchValuator(company_type="growth", verbose=False)
+                        results = valuator.valuate(data_list)
+                        st.session_state[cache_key] = results
+                except Exception as e:
+                    import traceback as _tb
+                    st.error(f"加载失败: {type(e).__name__}: {e}")
+                    with st.expander("完整堆栈"):
+                        st.code(_tb.format_exc())
+                    results = []
+                finally:
+                    st.session_state.force_refresh = False
+            elif mode == "akshare":
+                progress_bar = st.progress(0.0, text="准备加载...")
+                try:
+                    data_list = _load_akshare_batch_with_progress(
+                        tuple(stock_codes), progress_bar
+                    )
+                    if not data_list:
+                        st.error("没有成功加载任何股票，下面是具体失败原因：")
+                        failures = st.session_state.get("akshare_load_failures", [])
+                        client_errors = st.session_state.get("akshare_client_errors", {})
+                        if failures:
+                            st.code("\n".join(failures), language="text")
+                        if client_errors:
+                            st.markdown("**接口级错误：**")
+                            st.code("\n".join(f"{k} → {v}" for k, v in client_errors.items()),
+                                    language="text")
+                        st.caption("💡 海外服务器请改用 Yahoo Finance 模式，本地运行用 AKShare。")
+                        results = []
+                    else:
+                        valuator = BatchValuator(company_type="growth", verbose=False)
+                        results = valuator.valuate(data_list)
+                        st.session_state[cache_key] = results
+                except Exception as e:
+                    st.error(f"加载失败: {e}")
+                    results = []
+                finally:
+                    st.session_state.force_refresh = False
+            else:
+                # Tushare 模式
+                with st.spinner(f"正在加载并估值 {len(stock_codes)} 只股票..."):
+                    try:
+                        results = get_tushare_batch_results(get_token(), tuple(stock_codes))
+                        st.session_state[cache_key] = results
                     except Exception as e:
                         st.error(f"加载失败: {e}")
                         results = []
-                    finally:
-                        st.session_state.force_refresh = False
-                else:
-                    # Tushare 模式
-                    with st.spinner(f"正在加载并估值 {len(stock_codes)} 只股票..."):
-                        try:
-                            results = get_tushare_batch_results(get_token(), tuple(stock_codes))
-                            st.session_state[cache_key] = results
-                        except Exception as e:
-                            st.error(f"加载失败: {e}")
-                            results = []
         else:
             results = []
             st.info("请选择股票池或输入股票代码")
