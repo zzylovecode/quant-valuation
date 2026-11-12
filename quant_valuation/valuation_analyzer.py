@@ -278,12 +278,12 @@ class ValuationAnalyzer:
         """
         根据加权涨跌空间和估值离散度计算评级
 
-        评级标准（相对内在价值的折价/溢价）：
-          - 严重低估: upside >= 50%
-          - 低估:     20% <= upside < 50%
-          - 合理:     -15% <= upside < 20%
-          - 高估:     -40% <= upside < -15%
-          - 严重高估: upside < -40%
+        评级标准（相对内在价值的折价/溢价，偏价值投资口径）：
+          - 严重低估: upside >= 30%
+          - 低估:     10% <= upside < 30%
+          - 合理:     -10% <= upside < 10%
+          - 高估:     -30% <= upside < -10%
+          - 严重高估: upside < -30%
 
         可信度：
           - 方法数 >= 6 且离散度 < 50%: 高
@@ -291,13 +291,13 @@ class ValuationAnalyzer:
           - 其他: 低
         """
         # 评级
-        if weighted_upside >= 0.50:
+        if weighted_upside >= 0.30:
             rating = "严重低估"
-        elif weighted_upside >= 0.20:
+        elif weighted_upside >= 0.10:
             rating = "低估"
-        elif weighted_upside >= -0.15:
+        elif weighted_upside >= -0.10:
             rating = "合理"
-        elif weighted_upside >= -0.40:
+        elif weighted_upside >= -0.30:
             rating = "高估"
         else:
             rating = "严重高估"

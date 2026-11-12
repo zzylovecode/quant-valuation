@@ -485,17 +485,26 @@ def render():
 
         with fcol3:
             all_ratings = ["严重低估", "低估", "合理", "高估", "严重高估"]
-            rating_filter = st.multiselect(
-                "估值评级",
-                all_ratings,
-                default=all_ratings,
-                format_func=lambda x: f"{RATING_COLORS[x]['emoji']} {x}",
+            only_undervalued = st.checkbox(
+                "只看低估标的",
+                value=True,
+                help="勾选后仅显示「严重低估 + 低估」，取消勾选可自行组合评级",
             )
+            if only_undervalued:
+                rating_filter = ["严重低估", "低估"]
+                st.caption("🟢 严重低估（空间 ≥30%）+ 低估（10%~30%）")
+            else:
+                rating_filter = st.multiselect(
+                    "估值评级",
+                    all_ratings,
+                    default=all_ratings,
+                    format_func=lambda x: f"{RATING_COLORS[x]['emoji']} {x}",
+                )
 
         with fcol4:
             upside_range = st.slider(
                 "涨跌空间范围",
-                -0.8, 1.0, (-0.8, 1.0), 0.05,
+                -0.8, 1.0, (0.0, 1.0) if only_undervalued else (-0.8, 1.0), 0.05,
                 format="%.0f%%",
             )
 
@@ -600,7 +609,26 @@ def render():
             delta_color="inverse",
         )
     else:
-        st.warning("⚠️ 筛选后没有符合条件的股票，请调整筛选条件")
+        if only_undervalued and results:
+            st.warning(
+                "⚠️ 当前股票池没有「低估/严重低估」标的，市场整体估值偏高。"
+                "下面按上涨空间从高到低列出最接近低估的前 5 只，供参考："
+            )
+            top5 = sorted(results, key=lambda r: r.upside_downside, reverse=True)[:5]
+            st.dataframe(
+                pd.DataFrame([{
+                    "代码": r.ts_code,
+                    "名称": r.name,
+                    "现价": round(r.current_price, 2),
+                    "内在价值": round(r.intrinsic_value, 2),
+                    "涨跌空间(%)": round(r.upside_downside * 100, 1),
+                    "评级": r.rating,
+                } for r in top5]),
+                use_container_width=True, hide_index=True,
+            )
+            st.caption("💡 可取消「只看低估标的」查看全部评级，或换个股票池再试。")
+        else:
+            st.warning("⚠️ 筛选后没有符合条件的股票，请调整筛选条件")
         return
 
     st.markdown("---")
