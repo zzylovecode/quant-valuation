@@ -24,10 +24,15 @@ from typing import Dict, List, Optional
 
 import pandas as pd
 
-try:
-    import akshare as ak
-except ImportError:
-    ak = None
+
+def _get_ak():
+    """延迟导入 akshare（避免 import quant_valuation 时就触发网络请求，
+    导致 Streamlit Cloud 等境外环境启动超时）"""
+    try:
+        import akshare as ak  # noqa: PLC0415
+        return ak
+    except ImportError as e:
+        raise ImportError("需要安装 akshare 库：pip install akshare") from e
 
 
 # 代码格式转换：Tushare格式(600519.SH) <-> AKShare格式(sh600519 / 600519)
@@ -76,10 +81,7 @@ class AKShareClient:
             timeout: 请求超时时间（秒）
             enable_cache: 是否启用内存缓存
         """
-        if ak is None:
-            raise ImportError(
-                "需要安装 akshare 库：pip install akshare"
-            )
+        self._ak = _get_ak()  # 延迟导入 akshare，避免 import 包时就触发网络访问
 
         self.timeout = timeout
         self.enable_cache = enable_cache
@@ -116,23 +118,23 @@ class AKShareClient:
 
         checks = [
             ("stock_profile_cninfo(公司概况)",
-             lambda: ak.stock_profile_cninfo(symbol=code)),
+             lambda: self._ak.stock_profile_cninfo(symbol=code)),
             ("stock_zh_a_gbjg_em(股本结构)",
-             lambda: ak.stock_zh_a_gbjg_em(symbol=code)),
+             lambda: self._ak.stock_zh_a_gbjg_em(symbol=code)),
             ("stock_zh_a_daily(新浪日线)",
-             lambda: ak.stock_zh_a_daily(symbol=ak_code, adjust="qfq")),
+             lambda: self._ak.stock_zh_a_daily(symbol=ak_code, adjust="qfq")),
             ("stock_profit_sheet_by_report_em(东财利润表)",
-             lambda: ak.stock_profit_sheet_by_report_em(symbol=ak_code.upper())),
+             lambda: self._ak.stock_profit_sheet_by_report_em(symbol=ak_code.upper())),
             ("stock_balance_sheet_by_report_em(东财资产负债表)",
-             lambda: ak.stock_balance_sheet_by_report_em(symbol=ak_code.upper())),
+             lambda: self._ak.stock_balance_sheet_by_report_em(symbol=ak_code.upper())),
             ("stock_cash_flow_sheet_by_report_em(东财现金流)",
-             lambda: ak.stock_cash_flow_sheet_by_report_em(symbol=ak_code.upper())),
+             lambda: self._ak.stock_cash_flow_sheet_by_report_em(symbol=ak_code.upper())),
             ("stock_financial_report_sina(新浪利润表)",
-             lambda: ak.stock_financial_report_sina(stock=ak_code, symbol="利润表")),
+             lambda: self._ak.stock_financial_report_sina(stock=ak_code, symbol="利润表")),
             ("stock_financial_analysis_indicator(财务指标)",
-             lambda: ak.stock_financial_analysis_indicator(symbol=code)),
+             lambda: self._ak.stock_financial_analysis_indicator(symbol=code)),
             ("stock_individual_info_em(东财push2，易限流)",
-             lambda: ak.stock_individual_info_em(symbol=code)),
+             lambda: self._ak.stock_individual_info_em(symbol=code)),
         ]
 
         for name, fn in checks:
@@ -141,7 +143,7 @@ class AKShareClient:
                 rows.append({"接口": name, "状态": "OK", "详情": f"返回 {len(df)} 行"})
             except Exception as e:
                 detail = f"{type(e).__name__}: {str(e)[:150]}"
-                if not hasattr(ak, name.split("(")[0]):
+                if not hasattr(akshare, name.split("(")[0]):
                     detail = "当前 akshare 版本不存在该接口"
                 rows.append({"接口": name, "状态": "FAIL", "详情": detail})
 
@@ -156,7 +158,7 @@ class AKShareClient:
 
     def _em_income(self, ts_code: str) -> pd.DataFrame:
         """东方财富利润表，返回与新浪通道一致的列名"""
-        df = ak.stock_profit_sheet_by_report_em(symbol=_ts_to_ak(ts_code).upper())
+        df = self._ak.stock_profit_sheet_by_report_em(symbol=_ts_to_ak(ts_code).upper())
         if df is None or df.empty or "REPORT_DATE" not in df.columns:
             return pd.DataFrame()
 
@@ -185,7 +187,7 @@ class AKShareClient:
 
     def _em_balance(self, ts_code: str) -> pd.DataFrame:
         """东方财富资产负债表，返回与新浪通道一致的列名"""
-        df = ak.stock_balance_sheet_by_report_em(symbol=_ts_to_ak(ts_code).upper())
+        df = self._ak.stock_balance_sheet_by_report_em(symbol=_ts_to_ak(ts_code).upper())
         if df is None or df.empty or "REPORT_DATE" not in df.columns:
             return pd.DataFrame()
 
@@ -215,7 +217,7 @@ class AKShareClient:
 
     def _em_cashflow(self, ts_code: str) -> pd.DataFrame:
         """东方财富现金流量表，返回与新浪通道一致的列名"""
-        df = ak.stock_cash_flow_sheet_by_report_em(symbol=_ts_to_ak(ts_code).upper())
+        df = self._ak.stock_cash_flow_sheet_by_report_em(symbol=_ts_to_ak(ts_code).upper())
         if df is None or df.empty or "REPORT_DATE" not in df.columns:
             return pd.DataFrame()
 
@@ -264,7 +266,7 @@ class AKShareClient:
 
         # 1) 巨潮公司概况：名称 / 行业（不依赖东财 push2，稳定）
         try:
-            prof = ak.stock_profile_cninfo(symbol=code)
+            prof = self._ak.stock_profile_cninfo(symbol=code)
             if prof is not None and not prof.empty:
                 row = prof.iloc[0]
                 name = str(row.get("A股简称", "") or "")
@@ -275,7 +277,7 @@ class AKShareClient:
 
         # 2) 东财 F10 股本结构：总股本 / 流通股本（非 push2 接口）
         try:
-            gbjg = ak.stock_zh_a_gbjg_em(symbol=code)
+            gbjg = self._ak.stock_zh_a_gbjg_em(symbol=code)
             if gbjg is not None and not gbjg.empty:
                 gbjg = gbjg.sort_values("变更日期", ascending=False)
                 total_share = float(gbjg.iloc[0].get("总股本", 0) or 0)
@@ -286,7 +288,7 @@ class AKShareClient:
         # 3) 兜底：东财个股信息（走 push2，可能触发限流，仅在前两者失败时使用）
         if not name or total_share <= 0:
             try:
-                info = ak.stock_individual_info_em(symbol=code)
+                info = self._ak.stock_individual_info_em(symbol=code)
                 d = dict(zip(info["item"], info["value"]))
                 name = name or str(d.get("股票简称", "") or "")
                 industry = industry or str(d.get("行业", "") or "")
@@ -335,7 +337,7 @@ class AKShareClient:
             # 优先新浪（单次请求约 1s），失败再回退东方财富（分批请求，较慢）
             df = pd.DataFrame()
             try:
-                df = ak.stock_financial_report_sina(stock=ak_code, symbol="利润表")
+                df = self._ak.stock_financial_report_sina(stock=ak_code, symbol="利润表")
             except Exception as e:
                 self._fail(f"新浪利润表 {ts_code}", e)
             if df.empty:
@@ -405,7 +407,7 @@ class AKShareClient:
             # 优先新浪，失败再回退东方财富
             df = pd.DataFrame()
             try:
-                df = ak.stock_financial_report_sina(stock=ak_code, symbol="资产负债表")
+                df = self._ak.stock_financial_report_sina(stock=ak_code, symbol="资产负债表")
             except Exception as e:
                 self._fail(f"新浪资产负债表 {ts_code}", e)
             if df.empty:
@@ -476,7 +478,7 @@ class AKShareClient:
             # 优先新浪，失败再回退东方财富
             df = pd.DataFrame()
             try:
-                df = ak.stock_financial_report_sina(stock=ak_code, symbol="现金流量表")
+                df = self._ak.stock_financial_report_sina(stock=ak_code, symbol="现金流量表")
             except Exception as e:
                 self._fail(f"新浪现金流量表 {ts_code}", e)
             if df.empty:
@@ -632,7 +634,7 @@ class AKShareClient:
             # 优先新浪日线（不经过东财 push2，不会触发行情限流），失败再回退东财 / 腾讯
             df = pd.DataFrame()
             try:
-                raw = ak.stock_zh_a_daily(symbol=_ts_to_ak(ts_code), adjust="qfq")
+                raw = self._ak.stock_zh_a_daily(symbol=_ts_to_ak(ts_code), adjust="qfq")
                 if raw is not None and not raw.empty:
                     df = raw.rename(columns={"date": "trade_date", "volume": "vol"})
             except Exception as e:
@@ -640,7 +642,7 @@ class AKShareClient:
 
             if df.empty:
                 try:
-                    raw = ak.stock_zh_a_hist(
+                    raw = self._ak.stock_zh_a_hist(
                         symbol=code,
                         period="daily",
                         start_date=start,
@@ -659,7 +661,7 @@ class AKShareClient:
 
             if df.empty:
                 try:
-                    raw = ak.stock_zh_a_hist_tx(
+                    raw = self._ak.stock_zh_a_hist_tx(
                         symbol=_ts_to_ak(ts_code),
                         start_date=start,
                         end_date=end,
@@ -703,7 +705,7 @@ class AKShareClient:
         code = _ts_to_code(ts_code)
         try:
             # 新浪单只股票分红历史（0.5s 级别；原 stock_fhps_em 需拉全市场，非常慢）
-            df = ak.stock_history_dividend_detail(symbol=code, indicator="分红")
+            df = self._ak.stock_history_dividend_detail(symbol=code, indicator="分红")
             if df is None or df.empty:
                 return pd.DataFrame()
 
@@ -745,7 +747,7 @@ class AKShareClient:
 
         code = _ts_to_code(ts_code)
         try:
-            df = ak.stock_financial_analysis_indicator(symbol=code)
+            df = self._ak.stock_financial_analysis_indicator(symbol=code)
             if df.empty:
                 return pd.DataFrame()
 
