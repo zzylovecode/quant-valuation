@@ -136,7 +136,7 @@ def render():
             # 显示环境信息，帮助定位云端版本/网络问题
             col_ver1, col_ver2, col_ver3 = st.columns(3)
             with col_ver1:
-                st.metric("工具版本", "v0.6.3")
+                st.metric("工具版本", "v0.6.4")
             with col_ver2:
                 st.metric("类完整性",
                           "✅ 完整" if hasattr(_Fresh, "diagnose")
@@ -234,7 +234,7 @@ def render():
     st.subheader("📦 工具信息")
     col1, col2 = st.columns(2)
     with col1:
-        st.metric("版本", "v0.6.3")
+        st.metric("版本", "v0.6.4")
         st.metric("估值方法", "7 种")
         st.metric("选股策略", "7 种")
     with col2:

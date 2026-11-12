@@ -13,6 +13,7 @@ from typing import Dict, List, Optional
 
 from ..financial_data import FinancialData
 from ..valuation_analyzer import ValuationAnalyzer, ValuationSummary
+from ..industry_assumptions import resolve_terminal_growth
 
 
 @dataclass
@@ -45,6 +46,10 @@ class StockValuationResult:
     high_value: float = 0.0
     median_value: float = 0.0
 
+    # 假设参数
+    terminal_growth: float = 0.03      # 实际使用的永续增长率
+    growth_assumption_note: str = ""   # 行业假设说明
+
     def to_dict(self) -> Dict:
         """转换为字典（用于导出）"""
         return {
@@ -65,6 +70,7 @@ class StockValuationResult:
             "保守估值": round(self.low_value, 2),
             "乐观估值": round(self.high_value, 2),
             "中位估值": round(self.median_value, 2),
+            "永续增长率(%)": round(self.terminal_growth * 100, 2),
         }
 
 
@@ -83,7 +89,7 @@ class BatchValuator:
         company_type: str = "growth",
         dcf_growth_rate: Optional[float] = None,
         dcf_years: int = 5,
-        terminal_growth: float = 0.03,
+        terminal_growth: Optional[float] = None,
         enable_ddm: bool = True,
         enable_rim: bool = True,
         verbose: bool = True,
@@ -93,7 +99,9 @@ class BatchValuator:
             company_type: 公司类型模板 (growth/value/mature/cyclical/high_tech/financial)
             dcf_growth_rate: DCF 增长率，None 表示自动用历史 CAGR
             dcf_years: DCF 高速增长期年数
-            terminal_growth: 永续增长率
+            terminal_growth: 永续增长率。None 表示按行业自动取假设
+                （见 industry_assumptions.py，白酒板块下调至 1%）；
+                传入具体数值则对全部股票统一使用该值
             enable_ddm: 是否启用 DDM
             enable_rim: 是否启用剩余收益模型
             verbose: 是否打印进度
@@ -152,6 +160,13 @@ class BatchValuator:
         """对单只股票执行估值"""
         analyzer = ValuationAnalyzer(data)
 
+        # 永续增长率：显式指定则统一使用，否则按行业假设（白酒下调至 1%）
+        if self.terminal_growth is not None:
+            terminal_growth = self.terminal_growth
+            assumption_note = ""
+        else:
+            terminal_growth, assumption_note = resolve_terminal_growth(data)
+
         # 自动估算增长率
         growth_rate = self.dcf_growth_rate
         if growth_rate is None:
@@ -168,7 +183,7 @@ class BatchValuator:
             dcf_params={
                 "growth_rate": growth_rate,
                 "high_growth_years": self.dcf_years,
-                "terminal_growth": self.terminal_growth,
+                "terminal_growth": terminal_growth,
             },
             relative_params={
                 "industry_pe": data.industry_pe if data.industry_pe > 0 else None,
@@ -179,7 +194,7 @@ class BatchValuator:
             ddm_params={
                 "high_growth_rate": min(growth_rate * 0.7, 0.10),
                 "high_growth_years": 5,
-                "stable_growth_rate": self.terminal_growth,
+                "stable_growth_rate": terminal_growth,
             },
             rim_params={
                 "high_growth_years": 5,
@@ -211,6 +226,8 @@ class BatchValuator:
             low_value=summary.low_value,
             high_value=summary.high_value,
             median_value=summary.median_value,
+            terminal_growth=terminal_growth,
+            growth_assumption_note=assumption_note,
         )
 
         return result

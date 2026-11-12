@@ -1011,6 +1011,14 @@ def _render_stock_detail(r):
     c4.metric("PE", f"{r.pe:.1f}x" if r.pe > 0 else "N/A")
     c5.metric("ROE", f"{r.roe*100:.1f}%")
 
+    # 行业假设（如白酒板块永续增长率下调）
+    note = getattr(r, "growth_assumption_note", "")
+    tg = getattr(r, "terminal_growth", 0.03)
+    if note:
+        st.warning(f"📉 **永续增长率：{tg*100:.1f}%** —— {note}")
+    else:
+        st.caption(f"永续增长率假设：{tg*100:.1f}%（全局默认）")
+
     st.markdown("#### 📊 各方法估值对比")
 
     # 各方法估值柱状图
