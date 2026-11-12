@@ -40,6 +40,56 @@ def _ts_to_yf(ts_code: str) -> str:
     return ts_code
 
 
+def _ts_to_code(ts_code: str) -> str:
+    """Tushare 格式 → 纯数字代码"""
+    return ts_code.split(".")[0]
+
+
+def _looks_like_chinese(s: str) -> bool:
+    """字符串是否包含中文字符"""
+    return any("\u4e00" <= c <= "\u9fff" for c in s)
+
+
+# 中文名 / 中文行业 的轻量缓存（全局，避免每只股票都查一次）
+_CN_NAME_CACHE: Dict[str, str] = {}
+_CN_INDUSTRY_CACHE: Dict[str, str] = {}
+
+
+def _try_cn_info(ts_code: str, timeout: float = 5.0):
+    """
+    用 AKShare 的 stock_profile_cninfo 拿中文名 + 中文行业。
+    带线程级超时（防止海外 AKShare 也卡），不通则返回 None。
+
+    这个接口云端诊断过 OK，0.5s 内返回。
+    """
+    code = _ts_to_code(ts_code)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        import concurrent.futures as _futures
+
+        def _fetch():
+            try:
+                import akshare as _ak
+                prof = _ak.stock_profile_cninfo(symbol=code)
+                if prof is not None and not prof.empty:
+                    row = prof.iloc[0]
+                    return (
+                        str(row.get("A股简称", "") or ""),
+                        str(row.get("所属行业", "") or ""),
+                    )
+            except Exception:
+                pass
+            return None
+
+        with _futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(_fetch)
+            try:
+                return future.result(timeout=timeout)
+            except _futures.TimeoutError:
+                return None
+
+
 class YFinanceClient:
     """
     YFinance 客户端
@@ -84,6 +134,24 @@ class YFinanceClient:
         total_share = float(info.get("sharesOutstanding") or info.get("floatShares") or 0)
         float_share = float(info.get("floatShares") or total_share)
         total_mv = float(info.get("marketCap") or 0)  # 美元
+
+        # 优先用 AKShare 的中文名 + 中文行业（0.5s 超时，不通则保留英文）
+        cn_name = _CN_NAME_CACHE.get(ts_code)
+        cn_industry = _CN_INDUSTRY_CACHE.get(ts_code)
+        if not cn_name or not cn_industry:
+            cn = _try_cn_info(ts_code, timeout=5.0)
+            if cn is not None:
+                cn_name, cn_industry = cn
+                if cn_name:
+                    _CN_NAME_CACHE[ts_code] = cn_name
+                if cn_industry:
+                    _CN_INDUSTRY_CACHE[ts_code] = cn_industry
+
+        # 如果 yfinance 返回的是英文名，替换成中文（用 code 做标注防重复）
+        if cn_name and not _looks_like_chinese(name):
+            name = f"{cn_name} ({name})"
+        if cn_industry and not _looks_like_chinese(industry):
+            industry = cn_industry
 
         return pd.DataFrame([{
             "ts_code": ts_code,
