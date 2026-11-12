@@ -45,8 +45,8 @@ def get_tushare_batch_results(token: str, stock_codes: tuple):
     return results
 
 
-@st.cache_data(show_spinner="正在批量加载并估值（免费数据）...", ttl=3600)
-def get_akshare_batch_results(stock_codes: tuple):
+@st.cache_data(show_spinner="正在批量加载并估值（免费数据）...", ttl=0)
+def get_akshare_batch_results(stock_codes: tuple, _force: int = 0):
     """从 AKShare 获取批量估值结果（免费）"""
     data_list = load_batch_from_akshare(stock_codes)
     valuator = BatchValuator(
@@ -65,7 +65,24 @@ def _load_akshare_batch_with_progress(stock_codes: tuple, progress_bar):
         stock_codes: 股票代码元组
         progress_bar: st.progress 对象
     """
-    from quant_valuation.data_sources import AKShareDataBuilder
+    import sys as _sys
+    import importlib
+
+    # 强制 reload 所有相关模块，绕过 data_sources/__init__.py 里
+    # 可能残留的旧 AKShareClient 类缓存（云端 Reboot 后第一次运行就 OK）
+    for _name in [
+        "quant_valuation.data_sources.akshare_client",
+        "quant_valuation.data_sources.akshare_builder",
+        "quant_valuation.data_sources",
+    ]:
+        if _name in _sys.modules:
+            try:
+                importlib.reload(_sys.modules[_name])
+            except Exception:
+                pass
+
+    # 直接从模块 import，彻底绕过 __init__.py 缓存
+    from quant_valuation.data_sources.akshare_builder import AKShareDataBuilder
 
     builder = AKShareDataBuilder()
     data_list = []
@@ -82,7 +99,9 @@ def _load_akshare_batch_with_progress(stock_codes: tuple, progress_bar):
             data = builder.build(code, years=3)
             data_list.append(data)
         except Exception as e:
-            failed.append(f"{code}: {type(e).__name__}: {str(e)[:120]}")
+            import traceback as _tb
+            short_msg = f"{type(e).__name__}: {str(e)[:120]}"
+            failed.append(f"{code}: {short_msg}\n  {_tb.format_exc().strip()[-300:]}")
             continue
 
     # 收集客户端记录的接口级错误，便于排查
@@ -102,7 +121,7 @@ def _load_akshare_batch_with_progress(stock_codes: tuple, progress_bar):
 
     # 保存失败详情，供界面展示排查
     st.session_state["akshare_load_failures"] = failed[:10]
-    st.session_state["akshare_client_errors"] = dict(list(client_errors.items())[:10])
+    st.session_state["akshare_client_errors"] = dict(list(client_errors.items())[:20])
 
     return data_list
 

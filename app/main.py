@@ -67,7 +67,7 @@ with st.sidebar:
     )
 
     st.markdown("---")
-    st.caption("量化估值模型 v0.5.2")
+    st.caption("量化估值模型 v0.5.3")
     st.caption("支持 DCF / PE / PB / PEG / DDM / RIM")
 
 # 页面路由
