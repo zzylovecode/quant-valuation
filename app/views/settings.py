@@ -104,14 +104,55 @@ def render():
         st.caption("逐个测试 AKShare 各接口的连通性。云端部署在境外服务器时，"
                    "部分国内数据源可能访问受限，可用此功能定位问题。")
         if st.button("运行诊断（测试 600519 贵州茅台）"):
-            from quant_valuation.data_sources import AKShareClient
+            # 优先用模块级函数 diagnose_akshare，独立于 AKShareClient 类，
+            # 即使云端 .pyc 缓存导致类不完整也能正常调用
+            import sys as _sys
+            import importlib
+            for _name in [
+                "quant_valuation.data_sources.akshare_client",
+                "quant_valuation.data_sources",
+            ]:
+                if _name in _sys.modules:
+                    try:
+                        importlib.reload(_sys.modules[_name])
+                    except Exception:
+                        pass
+            # 直接从 akshare_client 模块 import，绕过 data_sources/__init__.py
+            from quant_valuation.data_sources.akshare_client import (
+                diagnose_akshare as _diag_fn,
+                AKShareClient as _Fresh,
+            )
 
             with st.spinner("正在逐个测试接口，约需 30~60 秒..."):
                 try:
-                    diag = AKShareClient().diagnose("600519.SH")
+                    # 额外显示环境信息，帮助定位云端版本问题
+                    col_ver1, col_ver2, col_ver3 = st.columns(3)
+                    with col_ver1:
+                        st.metric("工具版本", "v0.5.2")
+                    with col_ver2:
+                        st.metric("类完整性",
+                                  "✅ 完整" if hasattr(_Fresh, "diagnose")
+                                  else "❌ 不完整")
+                    with col_ver3:
+                        try:
+                            import akshare as _ak
+                            st.metric("akshare 版本", _ak.__version__)
+                        except Exception:
+                            st.metric("akshare 版本", "未安装")
+
+                    diag = _diag_fn("600519.SH")
                     st.dataframe(diag, use_container_width=True, hide_index=True)
+
+                    # 显示模块文件路径，帮助确认用的是哪个版本
+                    st.caption(
+                        f"akshare_client 文件: "
+                        f"{_sys.modules.get('quant_valuation.data_sources.akshare_client', {}).__dict__.get('__file__', '未知')}"
+                    )
                 except Exception as e:
+                    import traceback as _tb
                     st.error(f"诊断失败: {type(e).__name__}: {e}")
+                    with st.expander("查看完整堆栈"):
+                        st.code(_tb.format_exc())
 
     st.markdown("---")
 
@@ -139,7 +180,7 @@ def render():
     st.subheader("📦 工具信息")
     col1, col2 = st.columns(2)
     with col1:
-        st.metric("版本", "v0.5.0")
+        st.metric("版本", "v0.5.2")
         st.metric("估值方法", "7 种")
         st.metric("选股策略", "7 种")
     with col2:

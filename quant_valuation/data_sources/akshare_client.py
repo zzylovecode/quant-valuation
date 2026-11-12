@@ -61,6 +61,57 @@ def _ak_to_ts(ak_code: str) -> str:
     return ak_code
 
 
+def diagnose_akshare(ts_code: str = "600519.SH") -> pd.DataFrame:
+    """
+    模块级诊断函数。独立于 AKShareClient 类存在，
+    用于排查云端环境下数据源连通性问题（即使类 import 不完整也能调用）。
+    """
+    rows = []
+    try:
+        import akshare
+
+        rows.append({"接口": "akshare 版本", "状态": "OK", "详情": akshare.__version__})
+    except Exception as e:
+        rows.append({"接口": "akshare 导入", "状态": "FAIL", "详情": f"{type(e).__name__}: {str(e)[:150]}"})
+        return pd.DataFrame(rows)
+
+    code = _ts_to_code(ts_code)
+    ak_code = _ts_to_ak(ts_code)
+
+    checks = [
+        ("stock_profile_cninfo(公司概况)",
+         lambda: akshare.stock_profile_cninfo(symbol=code)),
+        ("stock_zh_a_gbjg_em(股本结构)",
+         lambda: akshare.stock_zh_a_gbjg_em(symbol=code)),
+        ("stock_zh_a_daily(新浪日线)",
+         lambda: akshare.stock_zh_a_daily(symbol=ak_code, adjust="qfq")),
+        ("stock_profit_sheet_by_report_em(东财利润表)",
+         lambda: akshare.stock_profit_sheet_by_report_em(symbol=ak_code.upper())),
+        ("stock_balance_sheet_by_report_em(东财资产负债表)",
+         lambda: akshare.stock_balance_sheet_by_report_em(symbol=ak_code.upper())),
+        ("stock_cash_flow_sheet_by_report_em(东财现金流)",
+         lambda: akshare.stock_cash_flow_sheet_by_report_em(symbol=ak_code.upper())),
+        ("stock_financial_report_sina(新浪利润表)",
+         lambda: akshare.stock_financial_report_sina(stock=ak_code, symbol="利润表")),
+        ("stock_financial_analysis_indicator(财务指标)",
+         lambda: akshare.stock_financial_analysis_indicator(symbol=code)),
+        ("stock_individual_info_em(东财push2，易限流)",
+         lambda: akshare.stock_individual_info_em(symbol=code)),
+    ]
+
+    for name, fn in checks:
+        try:
+            df = fn()
+            rows.append({"接口": name, "状态": "OK", "详情": f"返回 {len(df)} 行"})
+        except Exception as e:
+            detail = f"{type(e).__name__}: {str(e)[:150]}"
+            if not hasattr(akshare, name.split("(")[0]):
+                detail = "当前 akshare 版本不存在该接口"
+            rows.append({"接口": name, "状态": "FAIL", "详情": detail})
+
+    return pd.DataFrame(rows)
+
+
 class AKShareClient:
     """
     AKShare 客户端封装
