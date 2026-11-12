@@ -201,6 +201,62 @@ PRESET_POOLS = {
     ],
 }
 
+# 全市场扫描（从约 5000 只 A 股中按 PE/PB 粗筛，再做完整估值）
+MARKET_SCAN_KEY = "🔎 全市场扫描（低估值粗筛）"
+
+
+@st.cache_data(show_spinner="正在拉取全市场行情快照并粗筛...", ttl=1800)
+def get_market_candidates(max_pe: float, max_pb: float, min_mv: float, limit: int):
+    """
+    从全 A 股快照中按 PE / PB / 市值粗筛低估值候选。
+
+    Returns:
+        (codes, preview_rows, errors)
+        codes: 候选 ts_code 列表；preview_rows: 展示用明细；errors: 接口错误
+    """
+    from quant_valuation.data_sources import AKShareClient
+
+    client = AKShareClient()
+    snap = client.get_market_snapshot()
+    errors = dict(getattr(client, "errors", {}))
+
+    if snap.empty:
+        return [], [], errors
+
+    df = snap.copy()
+    df["pe"] = pd.to_numeric(df["pe"], errors="coerce")
+    df["pb"] = pd.to_numeric(df["pb"], errors="coerce")
+    df["total_mv"] = pd.to_numeric(df["total_mv"], errors="coerce")
+
+    total_count = len(df)
+
+    df = df[
+        (df["pe"] > 0) & (df["pe"] <= max_pe)
+        & (df["pb"] > 0) & (df["pb"] <= max_pb)
+        & (df["total_mv"] >= min_mv)
+    ].copy()
+
+    if df.empty:
+        return [], [{"提示": f"全市场 {total_count} 只中没有符合 PE≤{max_pe} / PB≤{max_pb} / 市值≥{min_mv}亿 的标的"}], errors
+
+    # 综合分：PE 与 PB 分位数越低越好
+    df["pe_rank"] = df["pe"].rank(pct=True)
+    df["pb_rank"] = df["pb"].rank(pct=True)
+    df["score"] = 1 - (df["pe_rank"] + df["pb_rank"]) / 2
+    df = df.sort_values("score", ascending=False).head(limit)
+
+    preview = [{
+        "代码": r["ts_code"],
+        "名称": r["name"],
+        "现价": round(float(r["price"]), 2) if pd.notna(r["price"]) else None,
+        "PE": round(float(r["pe"]), 1),
+        "PB": round(float(r["pb"]), 2),
+        "市值(亿)": round(float(r["total_mv"]), 0),
+    } for _, r in df.iterrows()]
+
+    return df["ts_code"].tolist(), preview, errors
+
+
 # 评级颜色配置
 RATING_COLORS = {
     "严重低估": {"bg": "#1b5e20", "text": "#ffffff", "emoji": "🟢"},
@@ -337,12 +393,42 @@ def render():
         with col_pool:
             pool_name = st.selectbox(
                 "股票池",
-                list(PRESET_POOLS.keys()) + ["自定义"],
-                index=0,
+                [MARKET_SCAN_KEY] + list(PRESET_POOLS.keys()) + ["自定义"],
+                index=1,
                 label_visibility="collapsed",
             )
 
-        if pool_name == "自定义":
+        if pool_name == MARKET_SCAN_KEY:
+            with col_custom:
+                st.caption("🔎 先按 PE/PB 从全 A 股粗筛，再逐只做完整估值")
+            mf1, mf2, mf3, mf4 = st.columns(4)
+            max_pe = mf1.slider("PE 上限", 5.0, 40.0, 20.0, 1.0)
+            max_pb = mf2.slider("PB 上限", 0.5, 5.0, 2.0, 0.1)
+            min_mv = mf3.slider("市值下限(亿)", 0.0, 500.0, 50.0, 10.0)
+            scan_limit = mf4.slider("候选数量", 10, 60, 20, 10)
+
+            scan_codes, scan_preview, scan_errors = get_market_candidates(
+                float(max_pe), float(max_pb), float(min_mv), int(scan_limit)
+            )
+            pool_key = f"scan_{max_pe}_{max_pb}_{min_mv}_{scan_limit}"
+            if not scan_codes:
+                stock_codes = []
+                if scan_errors:
+                    st.error("全市场快照获取失败（云端可能限制东财 push2 接口）：")
+                    st.code("\n".join(f"{k} → {v}" for k, v in scan_errors.items()),
+                            language="text")
+                    st.caption("💡 可改用预设股票池；或在本地运行后使用全市场扫描。")
+                elif scan_preview:
+                    st.warning(scan_preview[0].get("提示", "粗筛无结果，请放宽条件"))
+            else:
+                stock_codes = scan_codes
+                with st.expander(f"📋 粗筛候选明细（{len(stock_codes)} 只，点击展开）",
+                                 expanded=False):
+                    st.dataframe(pd.DataFrame(scan_preview),
+                                 use_container_width=True, hide_index=True)
+                    st.caption("💡 粗筛只是缩小范围；点下面「批量加载估值」才会做完整估值并给出低估评级。")
+        elif pool_name == "自定义":
+            pool_key = "custom"
             with col_custom:
                 custom_codes = st.text_area(
                     "自定义代码",
@@ -352,6 +438,7 @@ def render():
                 )
             stock_codes = [c.strip() for c in custom_codes.strip().split("\n") if c.strip()]
         else:
+            pool_key = pool_name
             stock_codes = PRESET_POOLS[pool_name]
             with col_custom:
                 st.caption(f"已选 **{len(stock_codes)}** 只：{', '.join(stock_codes[:5])}...")
@@ -380,7 +467,6 @@ def render():
     # ========== 获取数据 ==========
     if is_real_mode:
         if stock_codes:
-            pool_key = pool_name if pool_name != "自定义" else "custom"
             cache_key = f"batch_{mode}_{pool_key}_{len(stock_codes)}"
             refresh = st.session_state.get("force_refresh", False)
 
@@ -492,7 +578,7 @@ def render():
             )
             if only_undervalued:
                 rating_filter = ["严重低估", "低估"]
-                st.caption("🟢 严重低估（空间 ≥30%）+ 低估（10%~30%）")
+                st.caption("🟢 严重低估（空间 ≥50%）+ 低估（20%~50%）")
             else:
                 rating_filter = st.multiselect(
                     "估值评级",

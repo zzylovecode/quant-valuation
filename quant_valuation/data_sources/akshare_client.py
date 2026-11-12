@@ -860,3 +860,93 @@ class AKShareClient:
         except Exception as e:
             self._fail(f"获取财务指标失败 {ts_code}", e)
             return pd.DataFrame()
+
+    # ============================================================
+    # 全市场快照（用于低估值粗筛）
+    # ============================================================
+
+    def get_market_snapshot(self) -> pd.DataFrame:
+        """
+        获取全 A 股实时行情快照（约 5500+ 只），用于低估值粗筛。
+
+        数据源：腾讯行情（stock_zh_a_spot_tx，稳定、自带 PE/PB/市值）
+        兜底：东财 push2（stock_zh_a_spot_em，易限流）
+
+        Returns:
+            DataFrame，列为 ts_code / name / price / pct_chg / pe / pb / total_mv(亿)
+            失败返回空 DataFrame
+        """
+        cache_key = "market_snapshot"
+        cached = self._get_cache(cache_key)
+        if cached is not None:
+            return cached
+
+        # ---------- 首选：腾讯行情（非 push2，稳定） ----------
+        raw = pd.DataFrame()
+        try:
+            raw = self._ak.stock_zh_a_spot_tx()
+        except Exception as e:
+            self._fail("全市场快照 stock_zh_a_spot_tx", e)
+
+        if raw is not None and not raw.empty and "pe_ttm" in raw.columns:
+            out = pd.DataFrame()
+            out["code"] = raw["code"].astype(str)
+            out["name"] = raw["name"].astype(str)
+            out["price"] = pd.to_numeric(raw["zxj"], errors="coerce")
+            out["pct_chg"] = pd.to_numeric(raw["zdf"], errors="coerce")
+            out["pe"] = pd.to_numeric(raw["pe_ttm"], errors="coerce")
+            out["pb"] = pd.to_numeric(raw["pn"], errors="coerce")
+            # 腾讯 zsz 已是「亿元」
+            out["total_mv"] = pd.to_numeric(raw["zsz"], errors="coerce")
+
+            def _tx_to_ts(code: str) -> str:
+                c = code.lower()
+                if c.startswith("sh"):
+                    return f"{c[2:]}.SH"
+                if c.startswith("sz"):
+                    return f"{c[2:]}.SZ"
+                if c.startswith("bj"):
+                    return f"{c[2:]}.BJ"
+                return code
+
+            out["ts_code"] = out["code"].map(_tx_to_ts)
+            return self._finalize_snapshot(out, cache_key)
+
+        # ---------- 兜底：东财 push2 ----------
+        try:
+            df = self._ak.stock_zh_a_spot_em()
+        except Exception as e:
+            self._fail("全市场快照 stock_zh_a_spot_em", e)
+            return pd.DataFrame()
+
+        if df is None or df.empty:
+            return pd.DataFrame()
+
+        out = pd.DataFrame()
+        out["code"] = df["代码"].astype(str)
+        out["name"] = df["名称"].astype(str)
+        out["price"] = pd.to_numeric(df.get("最新价"), errors="coerce")
+        out["pct_chg"] = pd.to_numeric(df.get("涨跌幅"), errors="coerce")
+        out["pe"] = pd.to_numeric(df.get("市盈率-动态"), errors="coerce")
+        out["pb"] = pd.to_numeric(df.get("市净率"), errors="coerce")
+        out["total_mv"] = pd.to_numeric(df.get("总市值"), errors="coerce") / 1e8  # 元 → 亿元
+
+        def _to_ts(code: str) -> str:
+            if code.startswith(("60", "68", "9")):
+                return f"{code}.SH"
+            return f"{code}.SZ"
+
+        out["ts_code"] = out["code"].map(_to_ts)
+        return self._finalize_snapshot(out, cache_key)
+
+    def _finalize_snapshot(self, out: pd.DataFrame, cache_key: str) -> pd.DataFrame:
+        """统一清洗全市场快照：剔除 ST / 退市 / 停牌"""
+        out = out[
+            ~out["name"].str.contains("ST|退", na=False)
+            & out["price"].notna()
+            & (out["price"] > 0)
+        ].copy()
+        out = out[["ts_code", "name", "price", "pct_chg", "pe", "pb", "total_mv"]]
+        out = out.reset_index(drop=True)
+        self._set_cache(cache_key, out)
+        return out
