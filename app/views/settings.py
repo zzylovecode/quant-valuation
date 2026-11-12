@@ -123,36 +123,80 @@ def render():
                 AKShareClient as _Fresh,
             )
 
-            with st.spinner("正在逐个测试接口，约需 30~60 秒..."):
+            # 显示环境信息，帮助定位云端版本/网络问题
+            col_ver1, col_ver2, col_ver3 = st.columns(3)
+            with col_ver1:
+                st.metric("工具版本", "v0.5.2")
+            with col_ver2:
+                st.metric("类完整性",
+                          "✅ 完整" if hasattr(_Fresh, "diagnose")
+                          else "❌ 不完整")
+            with col_ver3:
                 try:
-                    # 额外显示环境信息，帮助定位云端版本问题
-                    col_ver1, col_ver2, col_ver3 = st.columns(3)
-                    with col_ver1:
-                        st.metric("工具版本", "v0.5.2")
-                    with col_ver2:
-                        st.metric("类完整性",
-                                  "✅ 完整" if hasattr(_Fresh, "diagnose")
-                                  else "❌ 不完整")
-                    with col_ver3:
-                        try:
-                            import akshare as _ak
-                            st.metric("akshare 版本", _ak.__version__)
-                        except Exception:
-                            st.metric("akshare 版本", "未安装")
+                    import akshare as _ak
+                    st.metric("akshare 版本", _ak.__version__)
+                except Exception:
+                    st.metric("akshare 版本", "未安装")
 
-                    diag = _diag_fn("600519.SH")
-                    st.dataframe(diag, use_container_width=True, hide_index=True)
+            # 实时进度条 + 当前接口名
+            progress = st.progress(0, text="准备中...")
+            status_text = st.empty()
 
-                    # 显示模块文件路径，帮助确认用的是哪个版本
-                    st.caption(
-                        f"akshare_client 文件: "
-                        f"{_sys.modules.get('quant_valuation.data_sources.akshare_client', {}).__dict__.get('__file__', '未知')}"
+            def _progress_cb(idx, total, name):
+                progress.progress(idx / total,
+                                  text=f"⏳ ({idx}/{total}) {name}")
+                status_text.caption(f"正在测试: {name}")
+
+            try:
+                diag = _diag_fn(
+                    "600519.SH",
+                    progress_cb=_progress_cb,
+                    timeout_per_call=15.0,
+                )
+                progress.progress(1.0, text="✅ 诊断完成")
+
+                # 状态着色
+                def _highlight(row):
+                    color = {
+                        "OK": "background: #d4edda; color: #155724",
+                        "FAIL": "background: #f8d7da; color: #721c24",
+                        "TIMEOUT": "background: #fff3cd; color: #856404",
+                    }.get(row["状态"], "")
+                    return [color] * len(row)
+
+                st.dataframe(
+                    diag.style.apply(_highlight, axis=1),
+                    use_container_width=True, hide_index=True,
+                )
+
+                # 汇总 + 网络环境判断
+                n_ok = (diag["状态"] == "OK").sum()
+                n_fail = (diag["状态"].isin(["FAIL", "TIMEOUT"])).sum()
+                st.markdown("---")
+                if n_ok == 0 and n_fail > 0:
+                    st.error(
+                        "🌐 **所有接口都无法连通** — "
+                        "Streamlit Cloud 美国服务器访问不了东方财富/新浪财经/巨潮等国内数据源。\n\n"
+                        "**解决方案**：\n"
+                        "1. **本地运行**（推荐）：`pip install -r requirements.txt` 然后 `streamlit run app/main.py`\n"
+                        "2. **内网穿透**：用 ngrok / 花生壳 把本地服务暴露到公网\n"
+                        "3. **改用 Tushare**（需 Token + 积分）：Tushare 有海外可访问的 API\n"
                     )
-                except Exception as e:
-                    import traceback as _tb
-                    st.error(f"诊断失败: {type(e).__name__}: {e}")
-                    with st.expander("查看完整堆栈"):
-                        st.code(_tb.format_exc())
+                elif n_ok > 0 and n_ok < len(diag) - 1:
+                    st.warning(
+                        f"⚠️ 部分接口可用（{n_ok} OK / {n_fail} 失败）。"
+                        f"失败的可能是东财 push2 接口（网络限流或境外屏蔽），"
+                        f"代码有新浪/腾讯回退通道，批量估值仍可工作。"
+                    )
+                else:
+                    st.success("✅ 所有接口连通正常！")
+
+            except Exception as e:
+                import traceback as _tb
+                progress.progress(0, text="❌ 诊断失败")
+                st.error(f"诊断失败: {type(e).__name__}: {e}")
+                with st.expander("查看完整堆栈"):
+                    st.code(_tb.format_exc())
 
     st.markdown("---")
 

@@ -61,18 +61,26 @@ def _ak_to_ts(ak_code: str) -> str:
     return ak_code
 
 
-def diagnose_akshare(ts_code: str = "600519.SH") -> pd.DataFrame:
+def diagnose_akshare(ts_code: str = "600519.SH", progress_cb=None,
+                     timeout_per_call: float = 10.0) -> pd.DataFrame:
     """
     模块级诊断函数。独立于 AKShareClient 类存在，
     用于排查云端环境下数据源连通性问题（即使类 import 不完整也能调用）。
+
+    Args:
+        progress_cb: 进度回调 progress_cb(current_index, total, current_name)
+        timeout_per_call: 单接口超时（秒），超过则标记为 TIMEOUT
     """
+    import concurrent.futures as _futures
+
     rows = []
     try:
         import akshare
 
         rows.append({"接口": "akshare 版本", "状态": "OK", "详情": akshare.__version__})
     except Exception as e:
-        rows.append({"接口": "akshare 导入", "状态": "FAIL", "详情": f"{type(e).__name__}: {str(e)[:150]}"})
+        rows.append({"接口": "akshare 导入", "状态": "FAIL",
+                     "详情": f"{type(e).__name__}: {str(e)[:150]}"})
         return pd.DataFrame(rows)
 
     code = _ts_to_code(ts_code)
@@ -99,15 +107,27 @@ def diagnose_akshare(ts_code: str = "600519.SH") -> pd.DataFrame:
          lambda: akshare.stock_individual_info_em(symbol=code)),
     ]
 
-    for name, fn in checks:
-        try:
-            df = fn()
-            rows.append({"接口": name, "状态": "OK", "详情": f"返回 {len(df)} 行"})
-        except Exception as e:
-            detail = f"{type(e).__name__}: {str(e)[:150]}"
-            if not hasattr(akshare, name.split("(")[0]):
-                detail = "当前 akshare 版本不存在该接口"
-            rows.append({"接口": name, "状态": "FAIL", "详情": detail})
+    total = len(checks)
+    for i, (name, fn) in enumerate(checks):
+        if progress_cb:
+            try:
+                progress_cb(i + 1, total, name)
+            except Exception:
+                pass
+
+        # 用线程 + 超时包装，防止单接口卡死整个诊断
+        with _futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(fn)
+            try:
+                df = future.result(timeout=timeout_per_call)
+                rows.append({"接口": name, "状态": "OK",
+                             "详情": f"返回 {len(df)} 行"})
+            except _futures.TimeoutError:
+                rows.append({"接口": name, "状态": "TIMEOUT",
+                             "详情": f"超过 {timeout_per_call}s 未响应"})
+            except Exception as e:
+                detail = f"{type(e).__name__}: {str(e)[:150]}"
+                rows.append({"接口": name, "状态": "FAIL", "详情": detail})
 
     return pd.DataFrame(rows)
 
