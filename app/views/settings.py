@@ -139,7 +139,7 @@ def render():
     st.subheader("📦 工具信息")
     col1, col2 = st.columns(2)
     with col1:
-        st.metric("版本", "v0.4.0")
+        st.metric("版本", "v0.5.0")
         st.metric("估值方法", "7 种")
         st.metric("选股策略", "7 种")
     with col2:
