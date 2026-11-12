@@ -362,6 +362,93 @@ def _rating_sort_key(rating: str) -> int:
     return order.get(rating, 5)
 
 
+def _clamp(x: float, lo: float = 0.0, hi: float = 100.0) -> float:
+    return max(lo, min(hi, x))
+
+
+def compute_quality(r) -> tuple:
+    """
+    质量分（0~100），用于区分「真便宜」和「价值陷阱」
+
+    构成：
+      - 盈利能力 50%：ROE 越高越好，20% 得满分
+      - 估值吸引力 30%：PE 越低越好，10 倍满分
+      - 资产性价比 20%：PB ÷ ROE(%) 越低越好，即「每 1% ROE 要付多少 PB」
+
+    Returns:
+        (score, label)
+    """
+    # 1) 盈利能力：ROE 20% 满分
+    roe_score = _clamp(r.roe / 0.20 * 100)
+
+    # 2) 估值吸引力：PE 分段线性
+    if r.pe <= 0:
+        pe_score = 0.0
+    elif r.pe <= 10:
+        pe_score = 100.0
+    elif r.pe <= 30:
+        pe_score = 100.0 - (r.pe - 10) / 20 * 60
+    elif r.pe <= 60:
+        pe_score = 40.0 - (r.pe - 30) / 30 * 40
+    else:
+        pe_score = 0.0
+
+    # 3) 资产性价比：PB ÷ ROE(%)
+    roe_pct = r.roe * 100
+    if r.pb <= 0 or roe_pct <= 0:
+        pb_score = 0.0
+    else:
+        fair = r.pb / roe_pct
+        if fair <= 0.1:
+            pb_score = 100.0
+        elif fair <= 0.3:
+            pb_score = 100.0 - (fair - 0.1) / 0.2 * 30
+        elif fair <= 0.6:
+            pb_score = 70.0 - (fair - 0.3) / 0.3 * 25
+        elif fair <= 1.0:
+            pb_score = 45.0 - (fair - 0.6) / 0.4 * 20
+        else:
+            pb_score = max(0.0, 25.0 - (fair - 1.0) * 25)
+
+    score = roe_score * 0.5 + pe_score * 0.3 + pb_score * 0.2
+
+    if score >= 80:
+        label = "优质"
+    elif score >= 65:
+        label = "良好"
+    elif score >= 50:
+        label = "一般"
+    else:
+        label = "偏弱"
+
+    # 价值陷阱提示：盈利能力差，但估值极低
+    if r.roe < 0.08 and 0 < r.pe < 15:
+        label = "疑似陷阱"
+
+    return round(score, 1), label
+
+
+QUALITY_COLORS = {
+    "优质": ("#1b5e20", "#ffffff"),
+    "良好": ("#66bb6a", "#ffffff"),
+    "一般": ("#ffca28", "#5d4037"),
+    "偏弱": ("#bdbdbd", "#424242"),
+    "疑似陷阱": ("#c62828", "#ffffff"),
+}
+
+
+def render_quality_badge(score: float, label: str) -> str:
+    """质量分徽标"""
+    bg, fg = QUALITY_COLORS.get(label, ("#999", "#fff"))
+    return (
+        f'<div style="text-align:center;">'
+        f'<span style="background-color:{bg};color:{fg};padding:2px 8px;'
+        f'border-radius:10px;font-size:12px;font-weight:700;">{score:.0f}</span>'
+        f'<div style="font-size:10px;color:#888;margin-top:2px;">{label}</div>'
+        f'</div>'
+    )
+
+
 def export_to_csv(results: list) -> bytes:
     """导出为 CSV"""
     df = pd.DataFrame([r.to_dict() for r in results])
@@ -563,7 +650,7 @@ def render():
         with fcol1:
             strategy = st.selectbox(
                 "排序方式",
-                ["综合估值上涨空间", "低 PE", "低 PB", "高 ROE", "高增长", "质优价廉得分"],
+                ["综合估值上涨空间", "质量分（真便宜优先）", "低 PE", "低 PB", "高 ROE", "高增长", "质优价廉得分"],
             )
 
         with fcol2:
@@ -604,6 +691,13 @@ def render():
         with pcol4:
             growth_min = st.slider("最低增速", -0.5, 0.8, -0.5, 0.02, format="%.0f%%")
 
+        st.caption(
+            "💡 **质量分** = 盈利能力 50%（ROE，20% 得满分）+ 估值吸引力 30%（PE，10 倍满分）"
+            "+ 资产性价比 20%（PB÷ROE%，越低越好）。"
+            "≥80 优质 ｜ 65~80 良好 ｜ 50~65 一般 ｜ <50 偏弱 ｜ "
+            "ROE<8% 却 PE<15 的标为「疑似陷阱」。"
+        )
+
     # ========== 执行筛选排序 ==========
     filtered = results
 
@@ -638,6 +732,8 @@ def render():
     # 排序
     if strategy == "综合估值上涨空间":
         filtered.sort(key=lambda r: r.upside_downside, reverse=True)
+    elif strategy == "质量分（真便宜优先）":
+        filtered.sort(key=lambda r: compute_quality(r)[0], reverse=True)
     elif strategy == "低 PE":
         filtered = sorted([r for r in filtered if r.pe > 0], key=lambda r: r.pe)
     elif strategy == "低 PB":
@@ -708,6 +804,8 @@ def render():
                     "现价": round(r.current_price, 2),
                     "内在价值": round(r.intrinsic_value, 2),
                     "涨跌空间(%)": round(r.upside_downside * 100, 1),
+                    "质量分": compute_quality(r)[0],
+                    "质量标签": compute_quality(r)[1],
                     "评级": r.rating,
                 } for r in top5]),
                 use_container_width=True, hide_index=True,
@@ -831,6 +929,7 @@ def render():
             "ROE": f'<div style="text-align:center;font-weight:600;">{r.roe*100:.1f}%</div>',
             "增速": f'<div style="text-align:center;color:{"#2e7d32" if r.profit_growth >= 0 else "#c62828"};">{r.profit_growth*100:+.1f}%</div>',
             "市值(亿)": f'<div style="text-align:right;">{r.market_cap:.0f}</div>',
+            "质量分": render_quality_badge(*compute_quality(r)),
             "评级": f'<div style="text-align:center;">{render_rating_badge(r.rating)}</div>',
         })
 
