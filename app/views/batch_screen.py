@@ -214,9 +214,15 @@ def get_market_candidates(max_pe: float, max_pb: float, min_mv: float, limit: in
         (codes, preview_rows, errors)
         codes: 候选 ts_code 列表；preview_rows: 展示用明细；errors: 接口错误
     """
-    from quant_valuation.data_sources import AKShareClient
+    import importlib
 
-    client = AKShareClient()
+    # 直接加载并重载实现模块，避免云端从 data_sources 包取到旧版类，
+    # 导致 get_market_snapshot 方法不存在。
+    akshare_client = importlib.import_module(
+        "quant_valuation.data_sources.akshare_client"
+    )
+    akshare_client = importlib.reload(akshare_client)
+    client = akshare_client.AKShareClient()
     snap = client.get_market_snapshot()
     errors = dict(getattr(client, "errors", {}))
 
