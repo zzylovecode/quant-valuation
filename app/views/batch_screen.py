@@ -442,6 +442,8 @@ QUALITY_COLORS = {
     "疑似陷阱": ("#c62828", "#ffffff"),
 }
 
+QUALITY_LABELS = ["优质", "良好", "一般", "偏弱", "疑似陷阱"]
+
 
 def render_quality_badge(score: float, label: str) -> str:
     """质量分徽标"""
@@ -697,6 +699,14 @@ def render():
         with pcol4:
             growth_min = st.slider("最低增速", -0.5, 0.8, -0.5, 0.02, format="%.0f%%")
 
+        quality_filter = st.multiselect(
+            "质量标签",
+            QUALITY_LABELS,
+            default=QUALITY_LABELS,
+            help="按质量分档位筛选：优质 ≥80 ｜ 良好 65~80 ｜ 一般 50~65 ｜ 偏弱 <50 ｜ "
+                 "ROE<8% 且 PE<15 标为「疑似陷阱」。清空则不限制。",
+        )
+
         st.caption(
             "💡 **质量分** = 盈利能力 50%（ROE，20% 得满分）+ 估值吸引力 30%（PE，10 倍满分）"
             "+ 资产性价比 20%（PB÷ROE%，越低越好）。"
@@ -734,6 +744,11 @@ def render():
 
     # 增速
     filtered = [r for r in filtered if r.profit_growth >= growth_min]
+
+    # 质量标签
+    if quality_filter and len(quality_filter) < len(QUALITY_LABELS):
+        filtered = [r for r in filtered
+                    if compute_quality(r)[1] in quality_filter]
 
     # 排序
     if strategy == "综合估值上涨空间":
