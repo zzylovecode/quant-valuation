@@ -67,7 +67,7 @@ with st.sidebar:
     )
 
     st.markdown("---")
-    st.caption("量化估值模型 v0.6.5")
+    st.caption("量化估值模型 v0.6.6")
     st.caption("支持 DCF / PE / PB / PEG / DDM / RIM")
 
 # 页面路由
@@ -81,7 +81,13 @@ elif "敏感性分析" in page:
     from views import sensitivity
     sensitivity.render()
 elif "批量估值" in page:
-    from views import batch_screen
+    import importlib
+
+    # Streamlit Cloud 部署后可能保留旧的页面模块，必须重载后再执行，
+    # 否则新函数体不会生效，traceback 行号也会与新源码错位。
+    batch_screen = importlib.reload(
+        importlib.import_module("views.batch_screen")
+    )
     batch_screen.render()
 elif "策略回测" in page:
     from views import backtest_view
